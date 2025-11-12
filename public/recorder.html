@@ -2,79 +2,27 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Recorder Debug Page</title>
+  <title>Consented Video Recorder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: Arial, sans-serif; padding: 18px; }
-    pre { background:#f6f6f6; border:1px solid #ddd; padding:12px; white-space:pre-wrap; }
-    #status { margin:10px 0; font-weight:600; }
-    button { padding:8px 10px; margin-right:8px; }
+    body{font-family:Arial,Helvetica,sans-serif;max-width:820px;margin:24px auto;padding:10px}
+    video{width:100%;max-width:480px;border:1px solid #ccc;border-radius:8px}
+    button{padding:8px 12px;margin:6px}
+    #status{margin-top:8px;font-weight:600}
   </style>
 </head>
 <body>
-  <h2>Recorder Debug Page</h2>
-  <div id="status">Status: starting…</div>
+  <h1>Consented Video Recorder</h1>
+  <p><strong>Consent:</strong> By pressing Start you consent to a short recording for testing/ID verification. The file will be uploaded.</p>
 
   <div>
-    <button id="testBtn">Test getUserMedia</button>
-    <button id="showFilesBtn">List /uploads (server)</button>
+    <button id="oneClick">Start &amp; Record (consent)</button>
   </div>
 
-  <h3>Console output</h3>
-  <pre id="out">— ready —</pre>
+  <div id="status">Idle.</div>
+  <video id="preview" autoplay playsinline muted></video>
 
-<script>
-const out = document.getElementById('out');
-const status = document.getElementById('status');
-
-function log(...args){
-  console.log(...args);
-  out.textContent += args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ') + '\n';
-  window.scrollTo(0,document.body.scrollHeight);
-}
-
-window.onerror = function(message, source, lineno, colno, error){
-  log('Window error:', message, 'at', source + ':' + lineno + ':' + colno, error && error.stack);
-  status.textContent = 'Status: error (see output)';
-};
-
-window.addEventListener('unhandledrejection', ev => {
-  log('Unhandled promise rejection:', ev.reason);
-  status.textContent = 'Status: error (see output)';
-});
-
-document.getElementById('testBtn').addEventListener('click', async () => {
-  status.textContent = 'Status: requesting camera permission...';
-  try {
-    const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    log('getUserMedia OK — tracks:', s.getTracks().map(t=>t.kind+'/'+t.label));
-    s.getTracks().forEach(t => t.stop());
-    status.textContent = 'Status: camera OK (permission granted)';
-  } catch (err) {
-    log('getUserMedia failed:', err && err.message || err);
-    status.textContent = 'Status: camera denied or not available';
-  }
-});
-
-document.getElementById('showFilesBtn').addEventListener('click', async () => {
-  status.textContent = 'Status: requesting /uploads listing...';
-  try {
-    // your server does not expose uploads by default; this checks /uploads/audit.log (if readable)
-    const r = await fetch('/uploads/audit.log', { method: 'GET' });
-    if (!r.ok) {
-      log('Fetch /uploads/audit.log returned', r.status, r.statusText);
-      status.textContent = 'Status: /uploads not readable publicly (expected)';
-      return;
-    }
-    const text = await r.text();
-    log('/uploads/audit.log content:\n' + text);
-    status.textContent = 'Status: fetched audit.log';
-  } catch (err) {
-    log('Error fetching /uploads/audit.log:', err && err.message || err);
-    status.textContent = 'Status: cannot fetch /uploads (likely protected)';
-  }
-});
-
-status.textContent = 'Status: ready — click "Test getUserMedia" to check camera permission or "List /uploads" for server file check';
-</script>
+  <!-- External script (CSP-compliant) -->
+  <script src="/recorder.js" defer></script>
 </body>
 </html>
