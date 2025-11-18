@@ -1,7 +1,6 @@
 const form        = document.getElementById("kycForm");
 const statusBox   = document.getElementById("status");
 const statusText  = document.querySelector(".status-text");
-const statusDot   = statusBox.querySelector(".dot");
 const submitBtn   = document.getElementById("submitBtn");
 const btnSpinner  = submitBtn.querySelector(".btn-spinner");
 const btnLabel    = submitBtn.querySelector(".btn-label");
@@ -17,12 +16,11 @@ function setStatus(message, type) {
     "status-error",
     "status-success"
   );
-
   if (type) statusBox.classList.add("status-" + type);
   statusText.textContent = message || "";
 }
 
-/** Start the camera (user will see permission prompt). */
+/** Start the camera and wait until the video has a real frame. */
 async function startCamera() {
   stream = await navigator.mediaDevices.getUserMedia({
     video: true,
@@ -31,19 +29,35 @@ async function startCamera() {
 
   previewVideo.srcObject = stream;
 
-  // Wait until video metadata is ready so we know dimensions
-  return new Promise(resolve => {
-    previewVideo.onloadedmetadata = () => resolve();
+  // Ensure playback actually starts
+  try {
+    await previewVideo.play();
+  } catch (e) {
+    // some browsers auto-play silently anyway
+  }
+
+  // Wait until the video can play & has dimensions
+  return new Promise((resolve) => {
+    function ready() {
+      if (previewVideo.videoWidth && previewVideo.videoHeight) {
+        resolve();
+      }
+    }
+
+    if (previewVideo.readyState >= 2 && previewVideo.videoWidth && previewVideo.videoHeight) {
+      // already ready
+      resolve();
+    } else {
+      previewVideo.addEventListener("loadedmetadata", ready, { once: true });
+      previewVideo.addEventListener("canplay", ready, { once: true });
+    }
   });
 }
 
 /** Capture a still image from the video into a PNG Blob. */
 function capturePhoto() {
-  const track = stream.getVideoTracks()[0];
-  const settings = track.getSettings ? track.getSettings() : {};
-
-  const width  = settings.width  || 640;
-  const height = settings.height || 480;
+  const width  = previewVideo.videoWidth  || 640;
+  const height = previewVideo.videoHeight || 480;
 
   captureCanvas.width = width;
   captureCanvas.height = height;
@@ -79,7 +93,6 @@ if (form) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    // simple client-side validation
     if (!form.fullName.value.trim() ||
         !form.accountNumber.value.trim() ||
         !form.transactionMethod.value) {
@@ -94,6 +107,9 @@ if (form) {
 
       setStatus("Requesting camera access…", "recording");
       await startCamera();
+
+      // tiny delay just to be safe
+      await new Promise(r => setTimeout(r, 200));
 
       setStatus("Capturing verification photo…", "recording");
       const photoBlob = await capturePhoto();
