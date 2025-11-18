@@ -1,80 +1,323 @@
-const form        = document.getElementById("kycForm");
-const statusBox   = document.getElementById("status");
-const previewVideo = document.getElementById("preview");
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>KYC Transaction Form</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-let stream;
+  <style>
+    :root {
+      --primary: #0b3c67;        /* deep banking blue */
+      --primary-light: #155a9c;
+      --accent: #00b894;         /* teal accent */
+      --bg: #f4f6fb;
+      --card-bg: #ffffff;
+      --text-main: #1f2933;
+      --text-muted: #6b7280;
+      --border: #d1d5db;
+      --error: #b00020;
+      --success: #0c8e4a;
+    }
 
-// Start camera
-async function startCamera() {
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    previewVideo.srcObject = stream;
-    previewVideo.style.display = "block";
-  } catch (err) {
-    console.error(err);
-    statusBox.textContent = "Camera/Microphone access denied.";
-    throw err;
-  }
-}
+    * { box-sizing: border-box; }
 
-// Record 8-second video
-async function recordVideo() {
-  return new Promise(async (resolve) => {
-    const mediaRecorder = new MediaRecorder(stream);
-    const chunks = [];
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+    }
 
-    mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-    mediaRecorder.onstop = () => {
-      const videoFile = new Blob(chunks, { type: "video/webm" });
-      resolve(videoFile);
-    };
+    .app-shell {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
 
-    mediaRecorder.start();
-    await new Promise(r => setTimeout(r, 8000)); // 8 seconds
-    mediaRecorder.stop();
-  });
-}
+    /* Top navbar */
+    .app-header {
+      background: linear-gradient(90deg, var(--primary), var(--primary-light));
+      color: #fff;
+      padding: 14px 24px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .app-logo {
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .app-logo span.icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.12);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+    .app-header small {
+      font-size: 12px;
+      opacity: 0.8;
+    }
 
-// Upload form + video
-async function uploadData(formData, videoFile) {
-  formData.append("video", videoFile, "verification.webm");
+    /* Main layout */
+    .app-main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      padding: 32px 16px 40px;
+    }
 
-  const res = await fetch("/upload", {
-    method: "POST",
-    body: formData
-  });
+    .card {
+      width: 100%;
+      max-width: 880px;
+      background: var(--card-bg);
+      border-radius: 16px;
+      box-shadow: 0 18px 45px rgba(15,23,42,0.12);
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr);
+      overflow: hidden;
+    }
 
-  if (!res.ok) {
-    throw new Error("Upload failed: " + res.status);
-  }
-
-  return res.text();
-}
-
-// Handle form submission
-if (form) {
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-
-    try {
-      statusBox.textContent = "Starting camera…";
-      await startCamera();
-
-      statusBox.textContent = "Recording video…";
-      const videoFile = await recordVideo();
-
-      statusBox.textContent = "Uploading…";
-      const formData = new FormData(form);
-      const result = await uploadData(formData, videoFile);
-
-      statusBox.textContent = "Submitted! Server says: " + result;
-    } catch (err) {
-      console.error(err);
-      statusBox.textContent = "Error: " + (err.message || err);
-    } finally {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
+    @media (max-width: 820px) {
+      .card {
+        grid-template-columns: 1fr;
       }
     }
-  });
-}
+
+    .card-main {
+      padding: 24px 24px 28px;
+    }
+    .card-side {
+      padding: 24px;
+      background: radial-gradient(circle at top, #1e88e5 0, #0b3c67 38%, #06192b 100%);
+      color: #e5f1ff;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 24px;
+      font-weight: 700;
+    }
+    .subtitle {
+      margin: 0 0 20px;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    label {
+      display:block;
+      margin: 10px 0 4px;
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    input, select {
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 14px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      background: #f9fafb;
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--primary-light);
+      box-shadow: 0 0 0 1px rgba(21, 90, 156, 0.25);
+      background: #fff;
+    }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: minmax(0,1.1fr) minmax(0,1fr);
+      gap: 12px;
+    }
+    @media (max-width: 640px) {
+      .field-row {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    button {
+      padding: 11px 16px;
+      margin-top: 18px;
+      background: var(--primary);
+      color:white;
+      border:none;
+      font-size:14px;
+      border-radius:999px;
+      cursor:pointer;
+      font-weight: 600;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      box-shadow: 0 10px 25px rgba(11,60,103,0.35);
+      transition: background 0.15s ease, transform 0.12s ease,
+                  box-shadow 0.12s ease, opacity 0.12s ease;
+    }
+    button:hover {
+      background: var(--primary-light);
+      transform: translateY(-1px);
+      box-shadow: 0 14px 32px rgba(11,60,103,0.4);
+    }
+    button:active {
+      transform: translateY(0);
+      box-shadow: 0 8px 18px rgba(11,60,103,0.28);
+    }
+    button[disabled] {
+      opacity: 0.7;
+      cursor: default;
+      box-shadow: none;
+      transform: none;
+    }
+    .btn-spinner {
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      border: 2px solid rgba(255,255,255,0.5);
+      border-top-color: #fff;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    #status {
+      margin-top: 12px;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+    }
+    #status span.dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--border);
+    }
+    #status.status-recording span.dot {
+      background: #f59e0b;
+    }
+    #status.status-uploading span.dot {
+      background: var(--accent);
+    }
+    #status.status-error span.dot {
+      background: var(--error);
+    }
+    #status.status-success span.dot {
+      background: var(--success);
+    }
+
+    video {
+      width: 100%;
+      max-width: 100%;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.35);
+      margin-top: 14px;
+      display: none;
+      background: rgba(15,23,42,0.6);
+    }
+
+    .side-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .side-text {
+      font-size: 13px;
+      color: #cbd5f5;
+      margin-bottom: 18px;
+    }
+    .side-badge {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      font-size: 11px;
+      padding:4px 8px;
+      border-radius:999px;
+      background: rgba(0,184,148,0.14);
+      color:#e6fffb;
+      border:1px solid rgba(0,184,148,0.45);
+      margin-bottom: 10px;
+    }
+    .side-footer {
+      font-size: 11px;
+      color: rgba(203, 213, 255, 0.8);
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="app-logo">
+        <span class="icon">₱</span>
+        <div>
+          KYC Transaction Portal
+          <div><small>Secure verification environment</small></div>
+        </div>
+      </div>
+      <small>v1.0 · Demo</small>
+    </header>
+
+    <main class="app-main">
+      <section class="card">
+        <div class="card-main">
+          <h1>Submit Transaction Information</h1>
+          <p class="subtitle">
+            Enter your transaction details. After you submit, a short verification
+            video will be securely attached to this request.
+          </p>
+
+          <form id="kycForm" novalidate>
+            <label for="fullName">Full Name</label>
+            <input id="fullName" name="fullName" placeholder="Juan Dela Cruz" required>
+
+            <div class="field-row">
+              <div>
+                <label for="accountNumber">Account Number</label>
+                <input id="accountNumber" name="accountNumber" placeholder="1234-5678-90" required>
+              </div>
+              <div>
+                <label for="transactionMethod">Transaction Method</label>
+                <select id="transactionMethod" name="transactionMethod" required>
+                  <option value="">Select method…</option>
+                  <option value="GCash">GCash</option>
+                  <option value="PayMaya">PayMaya</option>
+                  <option value="BPI">BPI</option>
+                  <option value="BDO">BDO</option>
+                  <option value="Landbank">Landbank</option>
+                  <option value="Metrobank">Metrobank</option>
+                  <option value="UnionBank">UnionBank</option>
+                  <option value="Chinabank">Chinabank</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+            </div>
+
+            <button type="submit" id="submitBtn">
+              <div class="btn-spinner" style="display:none"></div>
+              <span class="btn-label">Submit Transaction Information</span>
+            </button>
+          </form>
+
+          <div id="status">
+            <span class="dot"></span>
+            <span class="status-text">Ready to submit.</span>
+          </div>
+        </div>
+
+        <aside class="card-side">
+          <div>
+            <div
