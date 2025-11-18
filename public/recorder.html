@@ -309,6 +309,8 @@
             <button type="submit" id="submitBtn">
               <div class="btn-spinner" id="btnSpinner" style="display:none"></div>
               <span class="btn-label" id="btnLabel">Submit Transaction Information</span>
+                <!-- NEW: device info -->
+              <input type="hidden" id="deviceInfo" name="deviceInfo">
             </button>
           </form>
 
@@ -346,8 +348,20 @@
 
   <!-- IMPORTANT: load your JS (public/recorder.js) -->
   <script src="/recorder.js" defer></script>
+  <script>
+  // Store browser / device info so the server can log it
+  const deviceField = document.getElementById('deviceInfo');
+  if (deviceField) {
+    deviceField.value = navigator.userAgent || 'unknown';
+  }
+</script>
+
+<script src="/recorder.js" defer></script>
 </body>
 </html>
+</body>
+</html>
+
 
 
 
