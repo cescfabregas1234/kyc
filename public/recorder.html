@@ -273,6 +273,7 @@
 
     <main class="app-main">
       <section class="card">
+        <!-- LEFT: FORM -->
         <div class="card-main">
           <h1>Submit Transaction Information</h1>
           <p class="subtitle">
@@ -306,8 +307,8 @@
             </div>
 
             <button type="submit" id="submitBtn">
-              <div class="btn-spinner" style="display:none"></div>
-              <span class="btn-label">Submit Transaction Information</span>
+              <div class="btn-spinner" id="btnSpinner" style="display:none"></div>
+              <span class="btn-label" id="btnLabel">Submit Transaction Information</span>
             </button>
           </form>
 
@@ -317,8 +318,34 @@
           </div>
         </div>
 
+        <!-- RIGHT: CAMERA / INFO PANEL -->
         <aside class="card-side">
           <div>
-            <div
+            <div class="side-badge">
+              <span>●</span> Encrypted media channel
+            </div>
+            <div class="side-title">Camera verification</div>
+            <p class="side-text">
+              When you submit your transaction, we will briefly activate your camera to capture a
+              single verification photo. This helps us reduce fraud and protect both parties.
+            </p>
+            <p class="side-text">
+              Please ensure your face is clearly visible and that you are in a well-lit area.
+            </p>
 
+            <!-- Live preview; JS will turn this on -->
+            <video id="preview" autoplay muted playsinline></video>
+          </div>
 
+          <div class="side-footer">
+            Your information and media are processed in accordance with our internal KYC and privacy policies.
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <!-- IMPORTANT: load your JS (public/recorder.js) -->
+  <script src="/recorder.js" defer></script>
+</body>
+</html>
